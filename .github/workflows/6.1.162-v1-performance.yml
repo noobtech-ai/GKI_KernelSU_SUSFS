@@ -1,0 +1,40 @@
+```yaml
+name: 6.1.162 V1 Performance 300Hz
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    name: Build 6.1.162 V1 Performance
+    uses: ./.github/workflows/prepare.yml
+
+    with:
+      config_file: .github/config/android14-6.1.json
+
+      feature_set: SUSFS+NoMount+BBG+NET+DS+NTSync+Ptrace+Unicode+BPF+Perf
+
+      root_flavor: next
+
+      ksu_branch: dev-susfs
+
+      susfs_commit: 4fc9c1898ea66f51847cdbc0d1473ea4ef525a70
+
+      nomount_commit: d0f57d5c37ff02aae2299daded57919153240cb3
+
+      brand_name: V1-Perf-300Hz
+
+      os_patch_level: "2026-03"
+
+      variant: Normal
+
+      bypass: false
+
+      use_cache: true
+
+    secrets: inherit
+```
