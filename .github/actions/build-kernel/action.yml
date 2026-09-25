@@ -1,5 +1,6 @@
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
+
 inputs:
   version:
     description: 'Kernel config version (e.g., android14-6.1)'
@@ -11,12 +12,48 @@ runs:
   - name: Setup Kernel Configs
     if: false
     uses: ./.github/actions/set-kernel-config
-  
+
   - name: 'Build Kernel'
     shell: bash
     working-directory: ${{ github.workspace }}/kernel
     run: |
+      # Enable 300Hz kernel timer for Android 14 / 6.1
+      if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+        echo "========================================"
+        echo " Enabling 300Hz kernel timer"
+        echo " Kernel: ${{ inputs.version }}"
+        echo "========================================"
+
+        DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
+
+        if [ ! -f "$DEFCONFIG" ]; then
+          echo "ERROR: gki_defconfig not found:"
+          echo "$DEFCONFIG"
+          exit 1
+        fi
+
+        # Remove any existing HZ selection
+        sed -i '/^CONFIG_HZ_[0-9]\+=/d' "$DEFCONFIG"
+        sed -i '/^CONFIG_HZ=/d' "$DEFCONFIG"
+
+        # Enable 300Hz
+        echo "CONFIG_HZ_300=y" >> "$DEFCONFIG"
+
+        echo ""
+        echo "Final HZ setting:"
+        grep -E '^CONFIG_HZ(_[0-9]+)?=' "$DEFCONFIG" || true
+        echo ""
+
+        if ! grep -q '^CONFIG_HZ_300=y$' "$DEFCONFIG"; then
+          echo "ERROR: CONFIG_HZ_300 was not added!"
+          exit 1
+        fi
+
+        echo "SUCCESS: 300Hz timer configured."
+      fi
+
       sed -i 's/check_defconfig//' ./common/build.config.gki
+
       if [ -f "build/build.sh" ]; then
         BUILD_GKI_ARTIFACTS="" \
         BUILD_GKI_CERTIFICATION_TOOLS=0 \
@@ -49,7 +86,8 @@ runs:
         echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
         cp "bazel-bin/common/kernel_aarch64/Image" "${{ github.workspace }}/AnyKernel3/Image"
         exit 0
-        fi
+      fi
+
       if [ -f "/home/runner/out/dist/Image" ]; then
         echo "Found Image at /home/runner/out/dist/Image"
         cp "/home/runner/out/dist/Image" "${{ github.workspace }}/AnyKernel3/Image"
@@ -57,4 +95,3 @@ runs:
       fi
 
       exit 1
-
