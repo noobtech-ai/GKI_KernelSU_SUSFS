@@ -375,6 +375,57 @@ jobs:
         commit: ${{ inputs.nomount_commit }}
         kernel_version: ${{ inputs.kernel_version }}
 
+    - name: Enable 300Hz Kernel Timer
+      if: inputs.kernel_version == '6.1'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "========================================"
+        echo " Enabling 300Hz kernel timer"
+        echo " Kernel: ${{ inputs.version }}"
+        echo "========================================"
+
+        CONFIG="${GITHUB_WORKSPACE}/kernel/.config"
+
+        if [ ! -f "$CONFIG" ]; then
+          echo "ERROR: Kernel config not found at:"
+          echo "$CONFIG"
+          exit 1
+        fi
+
+        cd "${GITHUB_WORKSPACE}/kernel"
+
+        # Disable other HZ choices
+        scripts/config --disable CONFIG_HZ_100
+        scripts/config --disable CONFIG_HZ_250
+        scripts/config --disable CONFIG_HZ_1000
+
+        # Enable 300Hz
+        scripts/config --enable CONFIG_HZ_300
+
+        # Resolve the resulting CONFIG_HZ value
+        make olddefconfig
+
+        echo ""
+        echo "===== Final kernel timer configuration ====="
+        grep -E '^CONFIG_HZ(_[0-9]+)?=' .config || true
+        echo "============================================"
+
+        # Hard verification
+        if ! grep -q '^CONFIG_HZ_300=y' .config; then
+          echo "ERROR: CONFIG_HZ_300 was not enabled!"
+          exit 1
+        fi
+
+        if ! grep -q '^CONFIG_HZ=300' .config; then
+          echo "ERROR: CONFIG_HZ is not 300!"
+          exit 1
+        fi
+
+        echo ""
+        echo "SUCCESS: 300Hz kernel timer enabled."
+   
     - name: Apply ABI Compare Bypass
       if: false
       working-directory: ${{ github.workspace }}/kernel
