@@ -22,6 +22,7 @@ runs:
   using: composite
 
   steps:
+
     - name: Setup Kernel Configs
       if: false
       uses: ./.github/actions/set-kernel-config
@@ -32,17 +33,22 @@ runs:
       run: |
         set -euo pipefail
 
+        PAGE_SIZE="${{ inputs.page_size }}"
+
         echo "========================================"
         echo " Preparing kernel build"
         echo " Kernel: ${{ inputs.version }}"
+        echo " Page size: ${PAGE_SIZE}"
         echo "========================================"
 
-        # ========================================================
-        # 300Hz
-        # ========================================================
+        # Remove check_defconfig so our generated configuration
+        # can contain the custom options below.
+        sed -i 's/check_defconfig//' ./common/build.config.gki
 
+        # ============================================================
+        # 300Hz Kernel Timer
+        # ============================================================
         if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
-          echo ""
           echo "========================================"
           echo " Enabling 300Hz kernel timer"
           echo " Kernel: ${{ inputs.version }}"
@@ -56,9 +62,11 @@ runs:
             exit 1
           fi
 
+          # Remove any existing HZ selection.
           sed -i '/^CONFIG_HZ_[0-9]\+=/d' "$DEFCONFIG"
           sed -i '/^CONFIG_HZ=/d' "$DEFCONFIG"
 
+          # Enable 300Hz.
           echo "CONFIG_HZ_300=y" >> "$DEFCONFIG"
 
           echo ""
@@ -75,17 +83,89 @@ runs:
           echo "========================================"
         fi
 
-        # ========================================================
-        # Existing build configuration
-        # ========================================================
+        # ============================================================
+        # VPN Hide v1.3.0 - Built-in Kernel Backend
+        # ============================================================
+        if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+          echo "========================================"
+          echo " Integrating VPN Hide v1.3.0"
+          echo " Built-in backend"
+          echo " CONFIG_VPNHIDE=y"
+          echo "========================================"
 
-        PAGE_SIZE="${{ inputs.page_size }}"
+          cd "${{ github.workspace }}"
 
-        sed -i 's/check_defconfig//' ./common/build.config.gki
+          # Remove any previous checkout from this runner.
+          rm -rf vpnhide vpnhide-review
 
-        # ========================================================
-        # Build kernel
-        # ========================================================
+          echo "Cloning VPN Hide v1.3.0..."
+
+          git clone \
+            --depth=1 \
+            --branch v1.3.0 \
+            https://github.com/okhsunrog/vpnhide.git \
+            vpnhide
+
+          echo "VPN Hide v1.3.0 downloaded."
+
+          cd vpnhide
+
+          # VPN Hide v1.3.0's integration script requires uv.
+          if ! command -v uv >/dev/null 2>&1; then
+            echo "uv not found. Installing uv..."
+
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+
+          echo ""
+          echo "uv version:"
+          uv --version
+
+          echo ""
+          echo "Running VPN Hide built-in integration..."
+
+          uv run builtin/scripts/integrate.py apply \
+            --kernel "${{ github.workspace }}/kernel" \
+            --kmi android14-6.1 \
+            --output "${{ github.workspace }}/vpnhide-review"
+
+          echo ""
+          echo "VPN Hide integration completed."
+
+          cd "${{ github.workspace }}/kernel"
+
+          DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
+
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "ERROR: gki_defconfig not found after VPN Hide integration!"
+            exit 1
+          fi
+
+          # Ensure the built-in VPN Hide backend is enabled.
+          sed -i '/^CONFIG_VPNHIDE=/d' "$DEFCONFIG"
+          sed -i '/^# CONFIG_VPNHIDE is not set$/d' "$DEFCONFIG"
+
+          echo "CONFIG_VPNHIDE=y" >> "$DEFCONFIG"
+
+          echo ""
+          echo "VPN Hide configuration:"
+          grep -E '^CONFIG_VPNHIDE=' "$DEFCONFIG" || true
+          echo ""
+
+          if ! grep -qx 'CONFIG_VPNHIDE=y' "$DEFCONFIG"; then
+            echo "ERROR: CONFIG_VPNHIDE=y was not added!"
+            exit 1
+          fi
+
+          echo "SUCCESS: VPN Hide v1.3.0 built-in backend integrated."
+          echo "========================================"
+        fi
+
+        # ============================================================
+        # Kernel Build
+        # ============================================================
 
         if [ -f "build/build.sh" ]; then
 
@@ -127,21 +207,16 @@ runs:
 
         fi
 
-    # ============================================================
-    # Verify generated configuration
-    # ============================================================
-
-    - name: 'Verify Page Size and 300Hz in Generated .config'
+    # ================================================================
+    # Verify Generated Kernel Configuration
+    # ================================================================
+    - name: 'Verify Generated Kernel Configuration'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
 
         PAGE_SIZE="${{ inputs.page_size }}"
-
-        # --------------------------------------------------------
-        # Locate generated .config
-        # --------------------------------------------------------
 
         CONFIG_FILE=""
 
@@ -157,39 +232,35 @@ runs:
         done
 
         if [ -z "$CONFIG_FILE" ]; then
-          CONFIG_FILE="$(find bazel-bin/common /home/runner/out \
+          CONFIG_FILE="$(find \
+            bazel-bin/common \
+            /home/runner/out \
             -maxdepth 4 \
             -name .config \
             -type f \
             2>/dev/null | head -n1 || true)"
         fi
 
-        # --------------------------------------------------------
-        # If no config is found
-        # --------------------------------------------------------
-
         if [ -z "$CONFIG_FILE" ]; then
           if [ "$PAGE_SIZE" != "16k" ]; then
-            echo "WARNING: no .config found; skipping page-size verification for 4k."
+            echo "WARNING: no .config found; skipping configuration verification for 4k."
             exit 0
           fi
 
-          echo "ERROR: could not locate the generated .config; page size cannot be verified." >&2
+          echo "ERROR: could not locate the generated .config." >&2
           exit 1
         fi
 
         echo "========================================"
         echo " Verifying generated kernel .config"
+        echo " Config: $CONFIG_FILE"
         echo "========================================"
 
-        echo ""
-        echo "Config: $CONFIG_FILE"
-        echo ""
+        # ============================================================
+        # Verify HZ
+        # ============================================================
 
-        # --------------------------------------------------------
-        # Verify 300Hz
-        # --------------------------------------------------------
-
+        echo ""
         echo "HZ configuration:"
         grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" || true
         echo ""
@@ -209,25 +280,50 @@ runs:
 
         fi
 
-        # --------------------------------------------------------
-        # Verify page size
-        # --------------------------------------------------------
+        # ============================================================
+        # Verify VPN Hide
+        # ============================================================
+
+        if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+
+          echo ""
+          echo "VPN Hide configuration:"
+          grep -E '^(# )?CONFIG_VPNHIDE' "$CONFIG_FILE" || true
+          echo ""
+
+          if ! grep -qx 'CONFIG_VPNHIDE=y' "$CONFIG_FILE"; then
+            echo "ERROR: CONFIG_VPNHIDE=y was NOT found in the generated .config!" >&2
+
+            echo "Actual VPN Hide configuration:" >&2
+            grep -E '^(# )?CONFIG_VPNHIDE' "$CONFIG_FILE" >&2 || true
+
+            exit 1
+          fi
+
+          echo "SUCCESS: VPN Hide built-in backend is enabled."
+          echo "CONFIG_VPNHIDE=y"
+
+        fi
+
+        # ============================================================
+        # Verify Page Size
+        # ============================================================
 
         echo ""
         echo "Page-size configuration:"
-
-        grep -E \
-          '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' \
-          "$CONFIG_FILE" || true
-
+        grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' "$CONFIG_FILE" || true
         echo ""
 
         if [ "$PAGE_SIZE" = "16k" ]; then
+
           want_on="CONFIG_ARM64_16K_PAGES=y"
           want_off="# CONFIG_ARM64_4K_PAGES is not set"
+
         else
+
           want_on="CONFIG_ARM64_4K_PAGES=y"
           want_off="# CONFIG_ARM64_16K_PAGES is not set"
+
         fi
 
         if ! grep -qx "$want_on" "$CONFIG_FILE"; then
@@ -250,19 +346,17 @@ runs:
           exit 1
         fi
 
-        echo "Page size verified: ${PAGE_SIZE}"
+        echo "SUCCESS: Page size verified: ${PAGE_SIZE}"
 
         echo ""
         echo "========================================"
-        echo " Kernel configuration verified"
-        echo " 300Hz: OK"
-        echo " Page size: OK"
+        echo " All requested kernel configuration"
+        echo " checks passed."
         echo "========================================"
 
-    # ============================================================
-    # Gather build artifacts
-    # ============================================================
-
+    # ================================================================
+    # Gather Build Artifacts
+    # ================================================================
     - name: 'Gather Build Artifacts'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
@@ -289,59 +383,8 @@ runs:
           exit 0
         fi
 
-        echo "ERROR: Kernel Image not found!"
-        exit 1          fi
-
-
-          if ! grep -qx "$want_off" "$CONFIG_FILE"; then
-
-            echo "ERROR: expected '$want_off' in $CONFIG_FILE" >&2
-
-            grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
-              "$CONFIG_FILE" >&2 || true
-
-            exit 1
-
-          fi
-
-
-          echo "Page size verified: ${PAGE_SIZE}"
-
-        fi
-
-
-        echo ""
-        echo "========================================"
-        echo " VPN Hide + 300Hz verification complete"
-        echo "========================================"
-
-
-    # ============================================================
-    # Gather build artifacts
-    # ============================================================
-
-    - name: 'Gather Build Artifacts'
-      shell: bash
-      working-directory: ${{ github.workspace }}/kernel
-      run: |
-        set -euo pipefail
-
-        if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
-
-          echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
-
-          cp \
-            "bazel-bin/common/kernel_aarch64/Image" \
-            "${{ github.workspace }}/AnyKernel3/Image"
-
-          exit 0
-
-        fi
-
-
-        if [ -f "/home/runner/out/dist/Image" ]; then
-
-          echo "Found Image at /home/runner/out/dist/Image"
+        echo "ERROR: Kernel Image was not found!" >&2
+        exit 1         echo "Found Image at /home/runner/out/dist/Image"
 
           cp \
             "/home/runner/out/dist/Image" \
