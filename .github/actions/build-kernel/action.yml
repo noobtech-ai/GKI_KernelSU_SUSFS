@@ -22,15 +22,9 @@ runs:
   using: composite
 
   steps:
-
     - name: Setup Kernel Configs
       if: false
       uses: ./.github/actions/set-kernel-config
-
-
-    # ============================================================
-    # Build Kernel
-    # ============================================================
 
     - name: 'Build Kernel'
       shell: bash
@@ -39,86 +33,15 @@ runs:
         set -euo pipefail
 
         echo "========================================"
-        echo " Preparing additional kernel features"
+        echo " Preparing kernel build"
+        echo " Kernel: ${{ inputs.version }}"
         echo "========================================"
-
-
-        # ========================================================
-        # VPN HIDE
-        # ========================================================
-
-        echo ""
-        echo "========================================"
-        echo " Integrating VPN Hide"
-        echo "========================================"
-
-        cd "${{ github.workspace }}"
-
-        rm -rf vpnhide
-
-        echo "Cloning VPN Hide..."
-        git clone --depth=1 https://github.com/okhsunrog/vpnhide.git
-
-        echo "VPN Hide source downloaded."
-
-
-        # --------------------------------------------------------
-        # Integrate VPN Hide into kernel source
-        # --------------------------------------------------------
-
-        cd "${{ github.workspace }}/vpnhide"
-
-        echo "Running VPN Hide integration..."
-
-        python3 scripts/integrate.py \
-          --kernel "${{ github.workspace }}/kernel"
-
-        echo "VPN Hide source integrated."
-
-
-        # --------------------------------------------------------
-        # Enable CONFIG_VPNHIDE
-        # --------------------------------------------------------
-
-        cd "${{ github.workspace }}/kernel"
-
-        DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
-
-        if [ ! -f "$DEFCONFIG" ]; then
-          echo "ERROR: gki_defconfig not found:"
-          echo "$DEFCONFIG"
-          exit 1
-        fi
-
-        echo ""
-        echo "Enabling CONFIG_VPNHIDE..."
-
-        # Remove an existing value if present
-        sed -i '/^CONFIG_VPNHIDE=/d' "$DEFCONFIG"
-        sed -i '/^# CONFIG_VPNHIDE is not set$/d' "$DEFCONFIG"
-
-        echo "CONFIG_VPNHIDE=y" >> "$DEFCONFIG"
-
-        echo ""
-        echo "VPN Hide configuration:"
-        grep -E '^CONFIG_VPNHIDE=' "$DEFCONFIG" || true
-
-        if ! grep -q '^CONFIG_VPNHIDE=y$' "$DEFCONFIG"; then
-          echo "ERROR: CONFIG_VPNHIDE=y was not added!"
-          exit 1
-        fi
-
-        echo ""
-        echo "SUCCESS: VPN Hide configured."
-        echo "========================================"
-
 
         # ========================================================
         # 300Hz
         # ========================================================
 
         if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
-
           echo ""
           echo "========================================"
           echo " Enabling 300Hz kernel timer"
@@ -150,9 +73,7 @@ runs:
 
           echo "SUCCESS: 300Hz timer configured in gki_defconfig."
           echo "========================================"
-
         fi
-
 
         # ========================================================
         # Existing build configuration
@@ -162,9 +83,8 @@ runs:
 
         sed -i 's/check_defconfig//' ./common/build.config.gki
 
-
         # ========================================================
-        # Build
+        # Build kernel
         # ========================================================
 
         if [ -f "build/build.sh" ]; then
@@ -207,12 +127,11 @@ runs:
 
         fi
 
-
     # ============================================================
     # Verify generated configuration
     # ============================================================
 
-    - name: 'Verify Page Size, 300Hz and VPN Hide'
+    - name: 'Verify Page Size and 300Hz in Generated .config'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
@@ -245,115 +164,133 @@ runs:
             2>/dev/null | head -n1 || true)"
         fi
 
-        if [ -z "$CONFIG_FILE" ]; then
+        # --------------------------------------------------------
+        # If no config is found
+        # --------------------------------------------------------
 
+        if [ -z "$CONFIG_FILE" ]; then
           if [ "$PAGE_SIZE" != "16k" ]; then
             echo "WARNING: no .config found; skipping page-size verification for 4k."
-          else
-            echo "ERROR: could not locate the generated .config." >&2
+            exit 0
+          fi
+
+          echo "ERROR: could not locate the generated .config; page size cannot be verified." >&2
+          exit 1
+        fi
+
+        echo "========================================"
+        echo " Verifying generated kernel .config"
+        echo "========================================"
+
+        echo ""
+        echo "Config: $CONFIG_FILE"
+        echo ""
+
+        # --------------------------------------------------------
+        # Verify 300Hz
+        # --------------------------------------------------------
+
+        echo "HZ configuration:"
+        grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" || true
+        echo ""
+
+        if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+
+          if ! grep -qx 'CONFIG_HZ_300=y' "$CONFIG_FILE"; then
+            echo "ERROR: CONFIG_HZ_300=y was NOT found in the generated .config!" >&2
+
+            echo "Actual HZ configuration:" >&2
+            grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" >&2 || true
+
             exit 1
           fi
 
+          echo "SUCCESS: Generated kernel .config has CONFIG_HZ_300=y"
+
+        fi
+
+        # --------------------------------------------------------
+        # Verify page size
+        # --------------------------------------------------------
+
+        echo ""
+        echo "Page-size configuration:"
+
+        grep -E \
+          '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' \
+          "$CONFIG_FILE" || true
+
+        echo ""
+
+        if [ "$PAGE_SIZE" = "16k" ]; then
+          want_on="CONFIG_ARM64_16K_PAGES=y"
+          want_off="# CONFIG_ARM64_4K_PAGES is not set"
         else
+          want_on="CONFIG_ARM64_4K_PAGES=y"
+          want_off="# CONFIG_ARM64_16K_PAGES is not set"
+        fi
 
-          echo "========================================"
-          echo " Generated kernel configuration"
-          echo "========================================"
+        if ! grep -qx "$want_on" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_on' in $CONFIG_FILE" >&2
 
-          echo ""
-          echo "Config file:"
-          echo "$CONFIG_FILE"
+          grep -E \
+            '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
+            "$CONFIG_FILE" >&2 || true
 
-          echo ""
+          exit 1
+        fi
 
+        if ! grep -qx "$want_off" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_off' in $CONFIG_FILE" >&2
 
-          # ======================================================
-          # HZ
-          # ======================================================
+          grep -E \
+            '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
+            "$CONFIG_FILE" >&2 || true
 
-          echo "HZ configuration:"
-          grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" || true
+          exit 1
+        fi
 
-          echo ""
+        echo "Page size verified: ${PAGE_SIZE}"
 
-          if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+        echo ""
+        echo "========================================"
+        echo " Kernel configuration verified"
+        echo " 300Hz: OK"
+        echo " Page size: OK"
+        echo "========================================"
 
-            if ! grep -qx 'CONFIG_HZ_300=y' "$CONFIG_FILE"; then
+    # ============================================================
+    # Gather build artifacts
+    # ============================================================
 
-              echo "ERROR: CONFIG_HZ_300=y was NOT found in generated .config!" >&2
+    - name: 'Gather Build Artifacts'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
 
-              echo "Actual HZ configuration:" >&2
-              grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" >&2 || true
+        if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
+          echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
 
-              exit 1
+          cp \
+            "bazel-bin/common/kernel_aarch64/Image" \
+            "${{ github.workspace }}/AnyKernel3/Image"
 
-            fi
+          exit 0
+        fi
 
-            echo "SUCCESS: Generated kernel .config has CONFIG_HZ_300=y"
+        if [ -f "/home/runner/out/dist/Image" ]; then
+          echo "Found Image at /home/runner/out/dist/Image"
 
-          fi
+          cp \
+            "/home/runner/out/dist/Image" \
+            "${{ github.workspace }}/AnyKernel3/Image"
 
+          exit 0
+        fi
 
-          # ======================================================
-          # VPN Hide
-          # ======================================================
-
-          echo ""
-          echo "VPN Hide configuration:"
-
-          grep -E '^(# )?CONFIG_VPNHIDE=' "$CONFIG_FILE" || true
-
-          echo ""
-
-          if ! grep -qx 'CONFIG_VPNHIDE=y' "$CONFIG_FILE"; then
-
-            echo "ERROR: CONFIG_VPNHIDE=y was NOT found in generated .config!" >&2
-
-            echo "Actual VPN Hide configuration:" >&2
-            grep -E '^(# )?CONFIG_VPNHIDE=' "$CONFIG_FILE" >&2 || true
-
-            exit 1
-
-          fi
-
-          echo "SUCCESS: Generated kernel .config has CONFIG_VPNHIDE=y"
-
-
-          # ======================================================
-          # Page size
-          # ======================================================
-
-          echo ""
-          echo "Page-size configuration:"
-
-          grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' \
-            "$CONFIG_FILE" || true
-
-          echo ""
-
-          if [ "$PAGE_SIZE" = "16k" ]; then
-
-            want_on="CONFIG_ARM64_16K_PAGES=y"
-            want_off="# CONFIG_ARM64_4K_PAGES is not set"
-
-          else
-
-            want_on="CONFIG_ARM64_4K_PAGES=y"
-            want_off="# CONFIG_ARM64_16K_PAGES is not set"
-
-          fi
-
-
-          if ! grep -qx "$want_on" "$CONFIG_FILE"; then
-
-            echo "ERROR: expected '$want_on' in $CONFIG_FILE" >&2
-
-            grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
-              "$CONFIG_FILE" >&2 || true
-
-            exit 1
-
-          fi
+        echo "ERROR: Kernel Image not found!"
+        exit 1          fi
 
 
           if ! grep -qx "$want_off" "$CONFIG_FILE"; then
