@@ -1,5 +1,6 @@
 name: 'Build Kernel'
 description: 'Builds kernel using legacy build.sh or Bazel (kleaf)'
+
 inputs:
   version:
     description: 'Kernel config version (e.g., android14-6.1)'
@@ -14,6 +15,7 @@ inputs:
     required: false
     type: boolean
     default: false
+
 runs:
   using: composite
   steps:
@@ -55,7 +57,45 @@ runs:
       working-directory: ${{ github.workspace }}/kernel
       run: |
         PAGE_SIZE="${{ inputs.page_size }}"
+
+        # Enable 300Hz kernel timer for Android 14 / 6.1
+        if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+          echo "========================================"
+          echo " Enabling 300Hz kernel timer"
+          echo " Kernel: ${{ inputs.version }}"
+          echo "========================================"
+
+          DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
+
+          if [ ! -f "$DEFCONFIG" ]; then
+            echo "ERROR: gki_defconfig not found:"
+            echo "$DEFCONFIG"
+            exit 1
+          fi
+
+          # Remove any existing HZ selection
+          sed -i '/^CONFIG_HZ_[0-9]\+=/d' "$DEFCONFIG"
+          sed -i '/^CONFIG_HZ=/d' "$DEFCONFIG"
+
+          # Enable 300Hz
+          echo "CONFIG_HZ_300=y" >> "$DEFCONFIG"
+
+          echo ""
+          echo "300Hz setting added to gki_defconfig:"
+          grep -E '^CONFIG_HZ(_[0-9]+)?=' "$DEFCONFIG" || true
+          echo ""
+
+          if ! grep -q '^CONFIG_HZ_300=y$' "$DEFCONFIG"; then
+            echo "ERROR: CONFIG_HZ_300 was not added!"
+            exit 1
+          fi
+
+          echo "SUCCESS: 300Hz timer configured in gki_defconfig."
+          echo "========================================"
+        fi
+
         sed -i 's/check_defconfig//' ./common/build.config.gki
+
         if [ -f "build/build.sh" ]; then
           if [ "$PAGE_SIZE" != "4k" ]; then
             echo "ERROR: page_size=${PAGE_SIZE} is only supported by the Kleaf (Bazel) build; this tree uses build/build.sh." >&2
@@ -88,37 +128,63 @@ runs:
             //common:kernel_aarch64/Image
         fi
 
-    - name: 'Verify Page Size in Generated .config'
+    - name: 'Verify Page Size and 300Hz in Generated .config'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
       run: |
         set -euo pipefail
         PAGE_SIZE="${{ inputs.page_size }}"
 
-        # Kleaf writes the resolved .config under the kernel_config rule output
-        # dir; the legacy build.sh writes it into OUT_DIR. Locate it instead of
-        # hardcoding a path that upstream may rename.
+        # Locate the generated .config.
         CONFIG_FILE=""
         for candidate in \
           bazel-bin/common/kernel_aarch64_config/out_dir/.config \
           /home/runner/out/.config; do
-          if [ -f "$candidate" ]; then CONFIG_FILE="$candidate"; break; fi
+          if [ -f "$candidate" ]; then
+            CONFIG_FILE="$candidate"
+            break
+          fi
         done
+
         if [ -z "$CONFIG_FILE" ]; then
           CONFIG_FILE="$(find bazel-bin/common /home/runner/out -maxdepth 4 -name .config -type f 2>/dev/null | head -n1 || true)"
         fi
+
         if [ -z "$CONFIG_FILE" ]; then
           if [ "$PAGE_SIZE" != "16k" ]; then
-            # 4k builds are unchanged from before this feature; a missing .config
-            # is a gap in the check, not a reason to fail a working build.
             echo "WARNING: no .config found; skipping page-size verification for 4k."
             exit 0
           fi
           echo "ERROR: could not locate the generated .config; page size cannot be verified." >&2
           exit 1
         fi
-        echo "Verifying page size using $CONFIG_FILE"
+
+        echo "========================================"
+        echo "Verifying generated kernel .config"
+        echo "Config: $CONFIG_FILE"
+        echo "========================================"
+
+        echo ""
+        echo "HZ configuration:"
+        grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" || true
+        echo ""
+
+        # Verify 300Hz for Android 14 / 6.1
+        if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
+          if ! grep -qx 'CONFIG_HZ_300=y' "$CONFIG_FILE"; then
+            echo "ERROR: CONFIG_HZ_300=y was NOT found in the generated .config!" >&2
+            echo "Actual HZ configuration:" >&2
+            grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" >&2 || true
+            exit 1
+          fi
+
+          echo "SUCCESS: Generated kernel .config has CONFIG_HZ_300=y"
+        fi
+
+        echo ""
+        echo "Page size configuration:"
         grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' "$CONFIG_FILE" || true
+        echo ""
 
         if [ "$PAGE_SIZE" = "16k" ]; then
           want_on="CONFIG_ARM64_16K_PAGES=y"
@@ -133,11 +199,13 @@ runs:
           grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' "$CONFIG_FILE" >&2 || true
           exit 1
         fi
+
         if ! grep -qx "$want_off" "$CONFIG_FILE"; then
           echo "ERROR: expected '$want_off' in $CONFIG_FILE" >&2
           grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' "$CONFIG_FILE" >&2 || true
           exit 1
         fi
+
         echo "Page size verified: ${PAGE_SIZE}"
 
     - name: 'Gather Build Artifacts'
