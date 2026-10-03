@@ -41,8 +41,8 @@ runs:
         echo " Page size: ${PAGE_SIZE}"
         echo "========================================"
 
-        # Remove check_defconfig so our generated configuration
-        # can contain the custom options below.
+        # Remove check_defconfig so custom configuration
+        # changes can be applied.
         sed -i 's/check_defconfig//' ./common/build.config.gki
 
         # ============================================================
@@ -62,7 +62,7 @@ runs:
             exit 1
           fi
 
-          # Remove any existing HZ selection.
+          # Remove any existing HZ configuration.
           sed -i '/^CONFIG_HZ_[0-9]\+=/d' "$DEFCONFIG"
           sed -i '/^CONFIG_HZ=/d' "$DEFCONFIG"
 
@@ -95,8 +95,9 @@ runs:
 
           cd "${{ github.workspace }}"
 
-          # Remove any previous checkout from this runner.
-          rm -rf vpnhide vpnhide-review
+          # Remove any previous checkout.
+          rm -rf vpnhide
+          rm -rf vpnhide-review
 
           echo "Cloning VPN Hide v1.3.0..."
 
@@ -110,7 +111,9 @@ runs:
 
           cd vpnhide
 
-          # VPN Hide v1.3.0's integration script requires uv.
+          # ==========================================================
+          # Install uv if necessary
+          # ==========================================================
           if ! command -v uv >/dev/null 2>&1; then
             echo "uv not found. Installing uv..."
 
@@ -123,17 +126,44 @@ runs:
           echo "uv version:"
           uv --version
 
+          # ==========================================================
+          # Verify the actual kernel source directory
+          # ==========================================================
+          KERNEL_SOURCE="${{ github.workspace }}/kernel/common"
+
+          echo ""
+          echo "Checking kernel source:"
+          echo "$KERNEL_SOURCE"
+
+          if [ ! -f "$KERNEL_SOURCE/Makefile" ]; then
+            echo "ERROR: Kernel Makefile was not found!"
+            echo "Expected:"
+            echo "$KERNEL_SOURCE/Makefile"
+            echo ""
+            echo "Kernel directory contents:"
+            ls -la "${{ github.workspace }}/kernel" || true
+            exit 1
+          fi
+
+          echo "Kernel Makefile found."
+
+          # ==========================================================
+          # VPN Hide built-in integration
+          # ==========================================================
           echo ""
           echo "Running VPN Hide built-in integration..."
 
           uv run builtin/scripts/integrate.py apply \
-            --kernel "${{ github.workspace }}/kernel" \
+            --kernel "$KERNEL_SOURCE" \
             --kmi android14-6.1 \
             --output "${{ github.workspace }}/vpnhide-review"
 
           echo ""
           echo "VPN Hide integration completed."
 
+          # ==========================================================
+          # Enable CONFIG_VPNHIDE
+          # ==========================================================
           cd "${{ github.workspace }}/kernel"
 
           DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
@@ -143,10 +173,11 @@ runs:
             exit 1
           fi
 
-          # Ensure the built-in VPN Hide backend is enabled.
+          # Remove any previous VPN Hide setting.
           sed -i '/^CONFIG_VPNHIDE=/d' "$DEFCONFIG"
           sed -i '/^# CONFIG_VPNHIDE is not set$/d' "$DEFCONFIG"
 
+          # Enable VPN Hide directly in the GKI defconfig.
           echo "CONFIG_VPNHIDE=y" >> "$DEFCONFIG"
 
           echo ""
@@ -164,7 +195,7 @@ runs:
         fi
 
         # ============================================================
-        # Kernel Build
+        # Build Kernel
         # ============================================================
 
         if [ -f "build/build.sh" ]; then
@@ -257,7 +288,7 @@ runs:
         echo "========================================"
 
         # ============================================================
-        # Verify HZ
+        # Verify 300Hz
         # ============================================================
 
         echo ""
@@ -268,7 +299,7 @@ runs:
         if [[ "${{ inputs.version }}" == "android14-6.1" ]]; then
 
           if ! grep -qx 'CONFIG_HZ_300=y' "$CONFIG_FILE"; then
-            echo "ERROR: CONFIG_HZ_300=y was NOT found in the generated .config!" >&2
+            echo "ERROR: CONFIG_HZ_300=y was NOT found in generated .config!" >&2
 
             echo "Actual HZ configuration:" >&2
             grep -E '^(# )?CONFIG_HZ(_[0-9]+)?=' "$CONFIG_FILE" >&2 || true
@@ -292,7 +323,7 @@ runs:
           echo ""
 
           if ! grep -qx 'CONFIG_VPNHIDE=y' "$CONFIG_FILE"; then
-            echo "ERROR: CONFIG_VPNHIDE=y was NOT found in the generated .config!" >&2
+            echo "ERROR: CONFIG_VPNHIDE=y was NOT found in generated .config!" >&2
 
             echo "Actual VPN Hide configuration:" >&2
             grep -E '^(# )?CONFIG_VPNHIDE' "$CONFIG_FILE" >&2 || true
@@ -320,6 +351,71 @@ runs:
           want_off="# CONFIG_ARM64_4K_PAGES is not set"
 
         else
+
+          want_on="CONFIG_ARM64_4K_PAGES=y"
+          want_off="# CONFIG_ARM64_16K_PAGES is not set"
+
+        fi
+
+        if ! grep -qx "$want_on" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_on' in $CONFIG_FILE" >&2
+
+          grep -E \
+            '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
+            "$CONFIG_FILE" >&2 || true
+
+          exit 1
+        fi
+
+        if ! grep -qx "$want_off" "$CONFIG_FILE"; then
+          echo "ERROR: expected '$want_off' in $CONFIG_FILE" >&2
+
+          grep -E \
+            '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES' \
+            "$CONFIG_FILE" >&2 || true
+
+          exit 1
+        fi
+
+        echo "SUCCESS: Page size verified: ${PAGE_SIZE}"
+
+        echo ""
+        echo "========================================"
+        echo " All requested kernel configuration"
+        echo " checks passed."
+        echo "========================================"
+
+    # ================================================================
+    # Gather Build Artifacts
+    # ================================================================
+    - name: 'Gather Build Artifacts'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+
+        if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
+          echo "Found Image at bazel-bin/common/kernel_aarch64/Image"
+
+          cp \
+            "bazel-bin/common/kernel_aarch64/Image" \
+            "${{ github.workspace }}/AnyKernel3/Image"
+
+          exit 0
+        fi
+
+        if [ -f "/home/runner/out/dist/Image" ]; then
+          echo "Found Image at /home/runner/out/dist/Image"
+
+          cp \
+            "/home/runner/out/dist/Image" \
+            "${{ github.workspace }}/AnyKernel3/Image"
+
+          exit 0
+        fi
+
+        echo "ERROR: Kernel Image was not found!" >&2
+        exit 1
 
           want_on="CONFIG_ARM64_4K_PAGES=y"
           want_off="# CONFIG_ARM64_16K_PAGES is not set"
