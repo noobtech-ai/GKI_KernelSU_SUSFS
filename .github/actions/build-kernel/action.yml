@@ -50,6 +50,24 @@ runs:
     #       exit 1
     #     fi
 
+    - name: 'Set 300Hz Timer'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -e
+        echo "Configuring kernel timer frequency to 300Hz..."
+        for cfg_file in common/arch/arm64/configs/gki_defconfig common/arch/arm64/configs/androidconfig; do
+          if [ -f "$cfg_file" ]; then
+            # Strip out any pre-existing HZ frequency selections to avoid duplicate/conflicting configs
+            sed -i '/CONFIG_HZ_[0-9]\+/d' "$cfg_file" || true
+            sed -i '/CONFIG_HZ=/d' "$cfg_file" || true
+            
+            # Inject 300Hz configuration
+            echo "CONFIG_HZ_300=y" >> "$cfg_file"
+            echo "CONFIG_HZ=300" >> "$cfg_file"
+          fi
+        done
+
     - name: 'Build Kernel'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
