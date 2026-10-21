@@ -74,6 +74,12 @@ runs:
       run: |
         PAGE_SIZE="${{ inputs.page_size }}"
         sed -i 's/check_defconfig//' ./common/build.config.gki
+        
+        # Remove unused label 'show_pad' in task_mmu.c caused by BORE scheduler patch drift
+        if [ -f "./common/fs/proc/task_mmu.c" ]; then
+          sed -i '/show_pad:/d' ./common/fs/proc/task_mmu.c || true
+        fi
+
         if [ -f "build/build.sh" ]; then
           if [ "$PAGE_SIZE" != "4k" ]; then
             echo "ERROR: page_size=${PAGE_SIZE} is only supported by the Kleaf (Bazel) build; this tree uses build/build.sh." >&2
