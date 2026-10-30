@@ -80,10 +80,10 @@ runs:
     - name: 'Build Kernel'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
+      env:
+        PAGE_SIZE: ${{ inputs.page_size }}
       run: |
         set -euo pipefail
-
-        PAGE_SIZE="${{ inputs.page_size }}"
 
         # Locate build.config.gki dynamically
         if [ -f "common/build.config.gki" ]; then
@@ -149,10 +149,10 @@ runs:
     - name: 'Verify Generated Kernel Configuration'
       shell: bash
       working-directory: ${{ github.workspace }}/kernel
+      env:
+        PAGE_SIZE: ${{ inputs.page_size }}
       run: |
         set -euo pipefail
-
-        PAGE_SIZE="${{ inputs.page_size }}"
 
         echo "========================================"
         echo " Verifying Generated Kernel Configuration"
@@ -219,4 +219,49 @@ runs:
         grep -E '^(# )?CONFIG_ARM64_(4K|16K|64K)_PAGES|^CONFIG_ARM64_PAGE_SHIFT' "$CONFIG_FILE" || true
 
         if [ "$PAGE_SIZE" = "16k" ]; then
-          want_on="CONFIG_ARM6
+          want_on="CONFIG_ARM64_16K_PAGES=y"
+          want_off="# CONFIG_ARM64_4K_PAGES is not set"
+        else
+          want_on="CONFIG_ARM64_4K_PAGES=y"
+          want_off="# CONFIG_ARM64_16K_PAGES is not set"
+        fi
+
+        if ! grep -qx "$want_on" "$CONFIG_FILE"; then
+          echo "ERROR: Expected '$want_on' in $CONFIG_FILE"
+          exit 1
+        fi
+
+        if ! grep -qx "$want_off" "$CONFIG_FILE"; then
+          echo "ERROR: Expected '$want_off' in $CONFIG_FILE"
+          exit 1
+        fi
+
+        echo "SUCCESS: ${PAGE_SIZE} page size verified!"
+
+        echo ""
+        echo "ALL KERNEL CONFIGURATION CHECKS PASSED!"
+
+    - name: 'Gather Build Artifacts'
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel
+      run: |
+        set -euo pipefail
+
+        mkdir -p "${{ github.workspace }}/AnyKernel3"
+
+        for img in \
+          bazel-bin/common/kernel_aarch64/Image \
+          bazel-bin/kernel_aarch64/Image \
+          /home/runner/out/dist/Image; do
+
+          if [ -f "$img" ]; then
+            echo "Found Image at $img"
+            cp "$img" "${{ github.workspace }}/AnyKernel3/Image"
+            exit 0
+          fi
+
+        done
+
+        echo "ERROR: Kernel Image not found!"
+        exit 1
+        
